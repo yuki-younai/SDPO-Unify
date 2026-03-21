@@ -1,0 +1,61 @@
+defaults:
+  - ppo_trainer
+  - user
+  - _self_
+
+# KDRL: Knowledge Distillation Reinforced Learning
+# 论文最优配置: k2 估计器 + 线性衰减 β (5e-3 → 1e-3) + 响应级别屏蔽
+# 损失公式: L_KDRL = L_RL(GRPO) + β(t) * L_KD(k2)
+
+# MAX_PROMPT_LENGTH=2048
+# MAX_RESPONSE_LENGTH=8192
+# MAX_FEEDBACK_LENGTH=8192
+# TEMPLATE_LENGTH=512
+# MAX_MODEL_LEN=$((TEMPLATE_LENGTH + MAX_PROMPT_LENGTH + MAX_FEEDBACK_LENGTH + MAX_RESPONSE_LENGTH))
+max_model_len: 18944
+
+actor_rollout_ref:
+  actor:
+    ppo_mini_batch_size: 32
+    policy_loss:
+      loss_mode: sdpo
+      # KDRL 中 RL 部分使用 GRPO 策略梯度
+      kdrl_rl_loss_mode: grpo
+    self_distillation:
+      # 使用 Top-K logit 蒸馏（与 SDPO 一致）
+      full_logit_distillation: True
+      distillation_topk: 100
+      distillation_add_tail: True
+      # JSD（alpha=0.5）
+      alpha: 0.5
+      max_reprompt_len: 10240
+      is_clip: 2.0
+      dont_reprompt_on_self_success: True
+      # --- KDRL 核心参数 ---
+      # k2 估计器（梯度无偏，论文推荐）
+      kl_estimator: k2
+      # 线性衰减 β 调度（论文最优配置）
+      kdrl_beta_schedule: linear_decay
+      kdrl_beta_init: 5e-3
+      kdrl_beta_min: 1e-3
+      kdrl_beta_delta: 5e-5
+      # 响应级别屏蔽：正确回答不做 KD（避免 RL 与 KD 梯度冲突）
+      kdrl_masking_mode: response
+    optim:
+      lr: 1e-5
+  rollout:
+    n: 8
+    calculate_log_probs: True
+
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: False
+  rollout_correction:
+    rollout_is: token
+    rollout_is_threshold: 2.0
+
+data:
+  train_batch_size: 32
+
+trainer:
+  val_before_train: False

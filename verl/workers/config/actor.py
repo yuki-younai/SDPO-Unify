@@ -60,6 +60,24 @@ class SelfDistillationConfig(BaseConfig):
         environment_feedback_only_without_solution (bool): If True, only use feedback when no solution is available (ignore feedback when solution exists).
         reprompt_template_feedback (str): Template for reprompting with feedback but no solution.
         reprompt_template_feedback_solution (str): Template for reprompting with both feedback and solution.
+
+        KDRL-specific configurations (from KDRL paper):
+        kl_estimator (str): KL divergence estimator for non-full-logit distillation.
+            Options: "k2" (MSE, gradient-unbiased), "k3" (low-variance KL), "topk" (Top-K approximation).
+            Default "topk" matches original SDPO behavior.
+        kdrl_beta (float): KL distillation coefficient (β). Controls the strength of the KD signal.
+            0.0 disables KD loss scaling (uses raw distillation loss). Default 0.0.
+        kdrl_beta_schedule (str): Schedule for β coefficient.
+            "constant" - fixed β throughout training.
+            "linear_decay" - linearly decay from kdrl_beta_init to kdrl_beta_min.
+            "none" - no β scaling (equivalent to β=1, original SDPO behavior).
+        kdrl_beta_init (float): Initial β for linear_decay schedule. Default 5e-3.
+        kdrl_beta_min (float): Minimum β for linear_decay schedule. Default 1e-3.
+        kdrl_beta_delta (float): Per-step decay δ for linear_decay: β = max(β_init - δ*step, β_min). Default 5e-5.
+        kdrl_masking_mode (str): Response-level or group-level KD masking based on rewards.
+            "none" - no masking (default, original SDPO behavior).
+            "response" - mask out KD loss for responses with positive reward (r_i > 0).
+            "group" - mask out KD loss for entire group if any response has positive reward.
     """
 
     full_logit_distillation: bool = True
@@ -74,6 +92,14 @@ class SelfDistillationConfig(BaseConfig):
     dont_reprompt_on_self_success: bool = False
     remove_thinking_from_demonstration: bool = False
     is_clip: Optional[float] = None
+    # KDRL-specific configurations
+    kl_estimator: str = "topk"  # "k2", "k3", "topk"
+    kdrl_beta: float = 0.0  # 0.0 表示不缩放（原始 SDPO 行为）
+    kdrl_beta_schedule: str = "none"  # "none", "constant", "linear_decay"
+    kdrl_beta_init: float = 5e-3  # 线性衰减初始值
+    kdrl_beta_min: float = 1e-3  # 线性衰减最小值
+    kdrl_beta_delta: float = 5e-5  # 每步衰减量
+    kdrl_masking_mode: str = "none"  # "none", "response", "group"
     reprompt_template: str = (
         "{prompt}{solution}{feedback}\n\n"
         "Correctly solve the original question.\n"
@@ -110,6 +136,22 @@ class SelfDistillationConfig(BaseConfig):
             )
         if self.is_clip is not None and self.is_clip <= 0:
             raise ValueError(f"self_distillation.is_clip must be positive, got {self.is_clip}")
+        # KDRL 参数校验
+        valid_kl_estimators = ["k2", "k3", "topk"]
+        if self.kl_estimator not in valid_kl_estimators:
+            raise ValueError(
+                f"self_distillation.kl_estimator must be one of {valid_kl_estimators}, got {self.kl_estimator}"
+            )
+        valid_beta_schedules = ["none", "constant", "linear_decay"]
+        if self.kdrl_beta_schedule not in valid_beta_schedules:
+            raise ValueError(
+                f"self_distillation.kdrl_beta_schedule must be one of {valid_beta_schedules}, got {self.kdrl_beta_schedule}"
+            )
+        valid_masking_modes = ["none", "response", "group"]
+        if self.kdrl_masking_mode not in valid_masking_modes:
+            raise ValueError(
+                f"self_distillation.kdrl_masking_mode must be one of {valid_masking_modes}, got {self.kdrl_masking_mode}"
+            )
 
 
 @dataclass
@@ -154,6 +196,8 @@ class PolicyLossConfig(BaseConfig):
         clip_cov_ub (float): Upper bound for clip-cov loss.
         kl_cov_ratio (float): Ratio of tokens to be applied KL penalty for kl-cov loss.
         ppo_kl_coef (float): KL divergence penalty coefficient.
+        kdrl_rl_loss_mode (str): When using KDRL (loss_mode='sdpo' + kdrl_beta > 0), specifies the RL loss
+            component. Options: 'vanilla' (PPO), 'grpo', 'gpg', 'reinforce'. Default 'grpo'.
     """
 
     loss_mode: str = "vanilla"
@@ -162,6 +206,7 @@ class PolicyLossConfig(BaseConfig):
     clip_cov_ub: float = 5.0
     kl_cov_ratio: float = 0.0002
     ppo_kl_coef: float = 0.1
+    kdrl_rl_loss_mode: str = "grpo"
 
 
 @dataclass

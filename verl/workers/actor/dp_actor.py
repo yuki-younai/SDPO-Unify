@@ -108,6 +108,8 @@ class DataParallelPPOActor(BasePPOActor):
             else entropy_from_logits
         )
         self.device_name = get_device_name()
+        # KDRL: 全局训练步数计数器，用于 beta 退火
+        self._kdrl_global_step = 0
         self.param_dtype = PrecisionType.to_dtype(self.config.fsdp_config.get("dtype", "bfloat16"))
         if self.param_dtype == torch.float16:
             from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
@@ -707,6 +709,10 @@ class DataParallelPPOActor(BasePPOActor):
             select_keys.append("ref_log_prob")
         if self_distillation_enabled:
             select_keys.extend(list(self_distillation_required_keys))
+        # KDRL: 当启用奖励屏蔽时，需要 token_level_scores 来构建 masking
+        kdrl_masking_mode = getattr(self_distillation_cfg, 'kdrl_masking_mode', 'none') if self_distillation_cfg else 'none'
+        if kdrl_masking_mode != "none" and "token_level_scores" in data.batch.keys():
+            select_keys.append("token_level_scores")
         # Include pre-computed IS weights if present in batch
         # Weights are computed centrally in trainer and added to batch when algorithm.rollout_is=True
         if "rollout_is_weights" in data.batch.keys():
@@ -722,6 +728,9 @@ class DataParallelPPOActor(BasePPOActor):
         if has_multi_modal_inputs:
             non_tensor_select_keys.append("multi_modal_inputs")
         if self.use_prefix_grouper and "uid" in data.non_tensor_batch.keys():
+            non_tensor_select_keys.append("uid")
+        # KDRL: 组级别屏蔽需要 uid 来正确分组
+        if kdrl_masking_mode == "group" and "uid" in data.non_tensor_batch.keys() and "uid" not in non_tensor_select_keys:
             non_tensor_select_keys.append("uid")
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
@@ -805,6 +814,53 @@ class DataParallelPPOActor(BasePPOActor):
                     # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                     rollout_is_weights = model_inputs.get("rollout_is_weights", None)
 
+                    # KDRL: 计算当前 beta 系数
+                    kdrl_beta_current = None
+                    if self_distillation_enabled and self_distillation_cfg is not None:
+                        kdrl_beta_schedule = getattr(self_distillation_cfg, 'kdrl_beta_schedule', 'none')
+                        kdrl_beta = getattr(self_distillation_cfg, 'kdrl_beta', 0.0)
+                        if kdrl_beta_schedule == "constant" and kdrl_beta > 0:
+                            kdrl_beta_current = kdrl_beta
+                        elif kdrl_beta_schedule == "linear_decay":
+                            kdrl_beta_init = getattr(self_distillation_cfg, 'kdrl_beta_init', 5e-3)
+                            kdrl_beta_min = getattr(self_distillation_cfg, 'kdrl_beta_min', 1e-3)
+                            kdrl_beta_delta = getattr(self_distillation_cfg, 'kdrl_beta_delta', 5e-5)
+                            kdrl_beta_current = max(kdrl_beta_init - kdrl_beta_delta * self._kdrl_global_step, kdrl_beta_min)
+
+                    # KDRL: 计算基于奖励的 KD 屏蔽 mask
+                    kdrl_reward_mask = None
+                    if self_distillation_enabled and kdrl_masking_mode != "none":
+                        token_level_scores = model_inputs.get("token_level_scores", None)
+                        if token_level_scores is not None:
+                            # 计算序列级奖励：对 token_level_scores 沿 response_mask 求和
+                            seq_rewards = (token_level_scores * response_mask).sum(dim=-1)  # (batch_size,)
+                            if kdrl_masking_mode == "response":
+                                # 响应级别屏蔽：正确响应（r_i > 0）的 KD 损失被忽略
+                                kdrl_reward_mask = (seq_rewards <= 0).float()  # 1=应用KD, 0=屏蔽
+                            elif kdrl_masking_mode == "group":
+                                # 组级别屏蔽：基于 uid 分组（而非顺序索引），确保 balance_batch 打乱后仍正确
+                                uids = model_inputs.get("uid", None)
+                                if uids is not None:
+                                    # 按 uid 分组：相同 uid 的响应属于同一个 prompt
+                                    batch_size = seq_rewards.shape[0]
+                                    unique_uids = {}
+                                    for i, uid in enumerate(uids):
+                                        uid_key = uid if isinstance(uid, str) else str(uid)
+                                        if uid_key not in unique_uids:
+                                            unique_uids[uid_key] = []
+                                        unique_uids[uid_key].append(i)
+                                    # 对每个 uid 组：如果组内任何响应有正奖励，整组 KD 损失被抑制
+                                    kdrl_reward_mask = torch.ones(batch_size, device=seq_rewards.device, dtype=seq_rewards.dtype)
+                                    for uid_key, indices in unique_uids.items():
+                                        group_rewards = seq_rewards[indices]
+                                        if (group_rewards > 0).any():
+                                            # 组内存在正奖励 -> 整组屏蔽 KD
+                                            for idx in indices:
+                                                kdrl_reward_mask[idx] = 0.0
+                                else:
+                                    # fallback: uid 不可用时退化为响应级别屏蔽
+                                    kdrl_reward_mask = (seq_rewards <= 0).float()
+
                     if self_distillation_enabled:
                         teacher_inputs = {
                             "responses": model_inputs["responses"],
@@ -843,7 +899,30 @@ class DataParallelPPOActor(BasePPOActor):
                             self_distillation_mask=self_distillation_mask,
                             loss_agg_mode=loss_agg_mode,
                             rollout_is_weights=rollout_is_weights,
+                            kdrl_reward_mask=kdrl_reward_mask,
                         )
+
+                        # KDRL: 当 beta > 0 时，使用 RL + β·KD 的组合损失
+                        # 否则保持原始 SDPO 行为（纯 KD 损失作为策略梯度）
+                        if kdrl_beta_current is not None and kdrl_beta_current > 0:
+                            kd_loss = pg_loss  # 蒸馏损失
+                            # 计算标准 RL 策略梯度损失
+                            rl_policy_loss_fn = get_policy_loss_fn(getattr(self.config.policy_loss, "kdrl_rl_loss_mode", "grpo"))
+                            rl_loss, rl_metrics = rl_policy_loss_fn(
+                                old_log_prob=old_log_prob,
+                                log_prob=log_prob,
+                                advantages=advantages,
+                                response_mask=response_mask,
+                                loss_agg_mode=loss_agg_mode,
+                                config=self.config,
+                                rollout_is_weights=rollout_is_weights,
+                            )
+                            # 组合：L_KDRL = L_RL + β * L_KD
+                            pg_loss = rl_loss + kdrl_beta_current * kd_loss
+                            micro_batch_metrics["actor/kdrl_beta"] = kdrl_beta_current
+                            micro_batch_metrics["actor/kdrl_rl_loss"] = rl_loss.detach().item()
+                            micro_batch_metrics["actor/kdrl_kd_loss"] = kd_loss.detach().item()
+                            micro_batch_metrics.update({f"actor/rl_{k}": v for k, v in rl_metrics.items()})
 
                         pg_metrics["self_distillation/empty_target_batch"] = self_distillation_mask.sum().item() == 0
                         micro_batch_metrics.update(pg_metrics)
@@ -918,4 +997,6 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_optimizer.zero_grad()
         if did_update:
             self._update_teacher()
+            # KDRL: 更新全局步数计数器（用于 beta 退火）
+            self._kdrl_global_step += 1
         return metrics

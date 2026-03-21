@@ -1095,6 +1095,7 @@ def compute_self_distillation_loss(
     self_distillation_mask: Optional[torch.Tensor] = None,
     loss_agg_mode: str = "token-mean",
     rollout_is_weights: Optional[torch.Tensor] = None,
+    kdrl_reward_mask: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
 
     metrics = {}
@@ -1161,9 +1162,26 @@ def compute_self_distillation_loss(
 
         per_token_loss = kl_loss.sum(-1)
     else:
-        assert self_distillation_config.alpha == 1.0, "Only reverse KL is supported for non-full-logit distillation"
-        log_ratio = student_log_probs - teacher_log_probs
-        per_token_loss = log_ratio.detach() * student_log_probs
+        # 支持 KDRL 的多种 KL 估计器
+        kl_estimator = getattr(self_distillation_config, 'kl_estimator', 'topk')
+        if kl_estimator == "k2":
+            # k2 (MSE) 估计器：梯度无偏，E[∇k2] = ∇KL
+            # R(θ) = 0.5 * (log π_θ - log π_T)^2
+            log_ratio = student_log_probs - teacher_log_probs
+            per_token_loss = 0.5 * log_ratio.square()
+        elif kl_estimator == "k3":
+            # k3 (low-variance KL) 估计器：exp(r) - r - 1, 其中 r = log π_T - log π_θ
+            # 参见 Schulman, Approximating KL divergence, 2020
+            kl = teacher_log_probs - student_log_probs
+            kl = torch.clamp(kl, min=-20, max=20)
+            ratio = torch.exp(kl)
+            per_token_loss = (ratio - kl - 1).contiguous()
+            per_token_loss = torch.clamp(per_token_loss, min=-10, max=10)
+        else:
+            # 默认 "topk" 模式：原始 SDPO 反向 KL（需要 alpha==1.0）
+            assert self_distillation_config.alpha == 1.0, "Only reverse KL is supported for non-full-logit distillation with topk estimator"
+            log_ratio = student_log_probs - teacher_log_probs
+            per_token_loss = log_ratio.detach() * student_log_probs
 
     is_clip = self_distillation_config.is_clip
     if is_clip is not None:
@@ -1178,6 +1196,15 @@ def compute_self_distillation_loss(
     # Apply rollout correction weights if provided
     if rollout_is_weights is not None:
         per_token_loss = per_token_loss * rollout_is_weights
+
+    # KDRL: 应用基于奖励的 KD 屏蔽（响应级别或组级别）
+    if kdrl_reward_mask is not None:
+        # kdrl_reward_mask: (batch_size,) 的布尔/浮点 mask，1 表示应用 KD，0 表示屏蔽
+        per_token_loss = per_token_loss * kdrl_reward_mask.unsqueeze(1)
+
+    # 注意：KDRL 的 beta 缩放不在此函数内部做，而是在 dp_actor.py 的损失组合层面做：
+    # total_loss = rl_loss + beta * kd_loss
+    # 这样才能正确实现 KDRL 论文中 RL + β·KD 的组合公式
 
     loss = agg_loss(
         loss_mat=per_token_loss,

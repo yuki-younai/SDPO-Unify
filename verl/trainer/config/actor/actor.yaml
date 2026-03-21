@@ -75,6 +75,10 @@ policy_loss:
   # KL divergence penalty coefficient
   ppo_kl_coef: 0.1
 
+  # KDRL: RL loss component when using KDRL mode (loss_mode="sdpo" + kdrl_beta > 0)
+  # Options: "vanilla" (PPO), "grpo", "gpg", "reinforce"
+  kdrl_rl_loss_mode: "grpo"
+
 # self-distillation config
 self_distillation:
 
@@ -126,6 +130,29 @@ self_distillation:
 
   # IS clip for loss; null disables IS weighting
   is_clip: 2
+
+  # KDRL: KL divergence estimator for non-full-logit distillation
+  # Options: "k2" (MSE, gradient-unbiased), "k3" (low-variance KL), "topk" (Top-K approximation, original SDPO)
+  kl_estimator: topk
+
+  # KDRL: KL distillation coefficient beta. 0.0 disables beta scaling (original SDPO behavior)
+  kdrl_beta: 0.0
+
+  # KDRL: Schedule for beta coefficient: "none" (no scaling), "constant", "linear_decay"
+  kdrl_beta_schedule: none
+
+  # KDRL: Initial beta for linear_decay schedule
+  kdrl_beta_init: 5e-3
+
+  # KDRL: Minimum beta for linear_decay schedule
+  kdrl_beta_min: 1e-3
+
+  # KDRL: Per-step decay delta for linear_decay: beta = max(beta_init - delta*step, beta_min)
+  kdrl_beta_delta: 5e-5
+
+  # KDRL: Response/group masking mode for KD loss based on rewards
+  # "none" - no masking, "response" - mask correct responses, "group" - mask entire group if any correct
+  kdrl_masking_mode: none
 
   # Reprompting template - available variables: prompt, successful_previous_attempt, feedback
   reprompt_template: |-
