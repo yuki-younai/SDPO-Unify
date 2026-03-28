@@ -38,6 +38,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
+    format_validation_metric_key,
     process_validation_metrics,
 )
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, apply_kl_penalty, compute_advantage
@@ -645,25 +646,15 @@ class RobRayPPOTrainer(RayPPOTrainer):
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
-            core_var = "acc" if "acc" in var2metric2val else "reward"
             for var_name, metric2val in var2metric2val.items():
-                n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
                 for metric_name, metric_val in metric2val.items():
-                    if (
-                        (var_name == core_var)
-                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
-                        and (f"@{n_max}" in metric_name)
-                    ):
-                        metric_sec = "val-core"
-                    else:
-                        metric_sec = "val-aux"
-                    pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
-                    metric_dict[pfx] = metric_val
+                    key = format_validation_metric_key(data_source=data_source, var_name=var_name, metric_name=metric_name)
+                    metric_dict[key] = metric_val
 
         if len(sample_turns) > 0:
             sample_turns = np.concatenate(sample_turns)
-            metric_dict["val-aux/num_turns/min"] = sample_turns.min()
-            metric_dict["val-aux/num_turns/max"] = sample_turns.max()
-            metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
+            metric_dict["val/num_turns_min"] = sample_turns.min()
+            metric_dict["val/num_turns_max"] = sample_turns.max()
+            metric_dict["val/num_turns_mean"] = sample_turns.mean()
 
         return metric_dict

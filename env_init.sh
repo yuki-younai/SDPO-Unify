@@ -61,7 +61,7 @@ pip install flash_attn-2.8.1+cu12torch2.8cxx11abiFALSE-cp312-cp312-linux_x86_64.
 
 
 source /data/szs/250010072/szs/anaconda3/bin/activate
-conda activate agent
+conda activate exprl
 
 
 

@@ -1,6 +1,9 @@
 #!/bin/bash
 # start_pull.sh - 从远程 GitHub 仓库拉取最新代码
 
+git config user.email "guoweiyang2024@163.com"
+git config user.name "yuki-younai"
+
 set -e
 
 echo "========== Git Pull =========="

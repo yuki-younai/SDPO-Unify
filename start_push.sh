@@ -1,6 +1,9 @@
 #!/bin/bash
 # start_push.sh - 推送本地修改到远程 GitHub 仓库
 
+git config user.email "guoweiyang2024@163.com"
+git config user.name "yuki-younai"
+
 set -e
 
 # 获取 commit message，默认为 "update"

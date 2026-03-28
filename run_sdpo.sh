@@ -7,6 +7,12 @@ export WANDB_API_KEY="wandb_v1_Ay8hPJp7vTGcLcoQnIKX2zogqLn_58glXnfmjvSNXIhcdpzFL
 wandb login --relogin $WANDB_API_KEY
 export swanlab_api_key=FpaObNsPY6wSpfCM0Cu60
 swanlab login -k $swanlab_api_key
+export swanlab_api_key=FpaObNsPY6wSpfCM0Cu60
+swanlab login -k $swanlab_api_key
+# ray stop 
+ray stop --force
+# 为了保险，手动杀掉所有相关的 python 和 ray 进程（注意不要误杀其他人的任务）
+pkill -f ray
 
 # =============================================================================
 # ENVIRONMENT SETUP

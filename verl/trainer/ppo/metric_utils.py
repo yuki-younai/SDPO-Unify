@@ -508,6 +508,13 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
     return maj_val
 
 
+def format_validation_metric_key(data_source: str, var_name: str, metric_name: str, prefix: str = "val") -> str:
+    safe_data_source = str(data_source).replace("/", "__")
+    safe_var_name = str(var_name).replace("/", "__")
+    safe_metric_name = str(metric_name).replace("/", "_")
+    return f"{prefix}/{safe_data_source}__{safe_var_name}__{safe_metric_name}"
+
+
 def process_validation_metrics(
     data_sources: list[str], sample_uids: list[str], infos_dict: dict[str, list[Any]], seed: int = 42
 ) -> dict[str, dict[str, dict[str, float]]]:
